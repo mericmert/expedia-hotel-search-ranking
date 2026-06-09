@@ -1,0 +1,36 @@
+# Local environments
+.venv/
+
+# Python caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS/editor files
+.DS_Store
+.vscode/
+.idea/
+
+# Data and generated outputs
+data/
+artifacts/
+models*/
+outputs/
+plots/
+temp/
+*.csv
+metrics*.json
+*.pkl
+
+# Report build byproducts
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.synctex.gz
+*.toc

@@ -1,0 +1,68 @@
+\documentclass[runningheads]{llncs}
+
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{url}
+\usepackage{array}
+
+\begin{document}
+
+\title{Process Report: Expedia Hotel Search Recommendation}
+\titlerunning{Group 21: Process Report}
+
+\author{Meri\c{c} Mert Bulca\inst{1} \and Kayra I\c{s}\i{}k\inst{1} \and Merve \c{C}apan\inst{1}}
+\authorrunning{Group 21: Bulca et al.}
+
+\institute{Vrije Universiteit Amsterdam, Amsterdam, The Netherlands\\
+\email{\{m.m.bulca,k.isik,m.capan\}@student.vu.nl}\\
+Group 21: Meri\c{c} Mert Bulca (2879674), Kayra I\c{s}\i{}k (2891441), Merve \c{C}apan (2893915)}
+
+\maketitle
+
+\section{Work Schedule}
+
+At the beginning of the assignment, the group reviewed the task description and identified the Expedia task as a grouped learning-to-rank problem, where hotels must be ranked within each search query. The main stages of the work are summarized in Table~\ref{tab:schedule}.
+
+\begin{table}[h]
+\centering
+\caption{Overview of the work schedule}
+\label{tab:schedule}
+\small
+\setlength{\tabcolsep}{7pt}
+\begin{tabular}{p{2.3cm}p{6.4cm}p{2.8cm}}
+\toprule
+\textbf{Date} & \textbf{Main Tasks} & \textbf{Contributors} \\
+\midrule
+April 28--30 & Studied the assignment, defined the problem as ranking hotels within each search, reviewed NDCG@5, and agreed on an initial plan. & All members \\
+May 1--3 & Performed exploratory data analysis (EDA) on missing values, click and booking labels, search-group sizes, candidate counts, train--test differences, and position bias. & All members \\
+May 4 & Converted the raw CSV files to optimized parquet files, created the relevance labels, and removed train-only columns from the usable feature set. & Meri\c{c}, Kayra \\
+May 5--10 & Built and tested the main feature groups: within-search ranks, missing-value indicators, competitor summaries, property profiles, segment profiles, and target encodings. & Meri\c{c}, Kayra \\
+May 11--14 & Trained baseline models and first LightGBM ranking/classification models, checked grouped validation results, and inspected possible leakage issues. & Meri\c{c}, Kayra \\
+May 15--17 & Trained the final LightGBM and XGBoost models, tuned the rank-average ensemble, compared validation scores, and generated the Kaggle submission file. & Meri\c{c}, Kayra \\
+May 18--20 & Wrote and refined the scientific report, including the EDA findings, methodology, results, bias discussion, and explanation of the final model. & Merve \\
+May 21--23 & Finalized the report, process report, and presentation slides, then checked the final materials for consistency before submission. & All members \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Individual Contributions}
+
+Meri\c{c} Mert Bulca contributed most strongly to the technical implementation of the project. He worked on the main coding pipeline, including efficient data loading, data type optimization, feature generation, model training, validation, ensemble construction, and preparation of the final Kaggle submission. He also contributed to testing different model specifications and improving the final ranking performance.
+
+Kayra I\c{s}\i{}k contributed substantially to the technical and analytical parts of the project. He worked on data preparation, EDA, and feature engineering. In particular, he contributed to within-search comparison features, property-profile features, missing-value indicators, and competitor-based summaries. He also helped evaluate which feature groups were useful for the final solution.
+
+Merve \c{C}apan contributed mainly to interpretation, reporting, quality control, and presentation preparation. She worked on structuring the scientific report, explaining the business problem and methodology, interpreting the EDA findings, connecting the modeling choices to the assignment requirements, reviewing the report for clarity and consistency, and preparing the presentation narrative. She also contributed to the discussion of bias, fairness, and the overall explanation of the final approach.
+
+Although the coding workload was not exactly identical across group members, all members contributed meaningfully to the EDA, technical pipeline, scientific report, presentation, and final submission according to their role. The division of work reflected the strengths of the team: Meri\c{c} and Kayra focused more on implementation, feature engineering, and experimentation, while Merve focused more on EDA interpretation, reporting, quality control, and presentation.
+
+\section{Reflection on Team Cooperation}
+
+Overall, the cooperation within the team worked well. We divided the work based on what each member could contribute most effectively, but we still discussed the main decisions together. These decisions included the validation strategy, feature engineering approach, model selection, report structure, and presentation content. This helped us keep the technical work and the written explanation consistent with each other.
+
+One strength of the group was that the members brought different backgrounds to the project. Meri\c{c}'s computer science background was useful for implementation and model development, while Kayra's and Merve's econometrics backgrounds helped with evaluation, analytical choices, interpretation, reporting, and presentation.
+
+One point for improvement is that we could have planned the split between coding, report writing, and presentation work earlier. In practice, Meri\c{c} and Kayra took more responsibility for the implementation, while Merve focused more on reporting, interpretation, and presentation preparation. This division worked in the end, but an earlier plan would have made the workload clearer from the start. As a group, we learned how to approach a large-scale recommender-system problem and explain a technical solution in a concise and structured way.
+
+\end{document}

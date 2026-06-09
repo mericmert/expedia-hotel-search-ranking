@@ -1,0 +1,345 @@
+\documentclass[runningheads]{llncs}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{array}
+\usepackage{url}
+\usepackage[hidelinks]{hyperref}
+
+\begin{document}
+
+\title{Expedia Hotel Search Recommendation}
+\titlerunning{Group 21: Expedia Hotel Search Recommendation}
+
+\author{Meri\c{c} Mert Bulca\inst{1} \and Kayra I\c{s}\i{}k\inst{1} \and Merve \c{C}apan\inst{1}}
+\authorrunning{Group 21: Bulca et al.}
+\institute{Vrije Universiteit Amsterdam, Amsterdam, The Netherlands\\
+\email{\{m.m.bulca,k.isik,m.capan\}@student.vu.nl}\\
+Group 21: Meri\c{c} Mert Bulca (2879674), Kayra I\c{s}\i{}k (2891441), Merve \c{C}apan (2893915)}
+\maketitle
+
+\section{Introduction}
+
+This report describes our solution for the Expedia hotel search recommendation task in the Data Mining Techniques competition.  Each training row represents one hotel candidate shown for a search query.  The goal is to rank all candidate hotels within each \texttt{srch\_id} so that hotels that are booked, or at least clicked, appear near the top.  The official metric is normalized discounted cumulative gain at rank five (NDCG@5), with relevance grades 5 for bookings, 1 for click-only interactions, and 0 otherwise.
+
+The structure of the data and the NDCG@5 metric make this a grouped ranking problem: each search contains a set of hotel candidates, and performance depends on their order within that search.  For this reason, we treated the task as learning to rank within each \texttt{srch\_id} rather than as independent row classification.  The final submission used a rank-average blend of a LightGBM ranking/classification ensemble and an XGBoost ranker.  This model was selected because it had the best local validation score, with an out-of-fold NDCG@5 of 0.42657, and our best private leaderboard submission score, 0.43101.
+
+\subsection{Related Work}
+
+The dataset is derived from the Expedia Personalized Sort competition \cite{expedia2013}, where the central problem was to order hotel results according to user intent rather than only by historical popularity.  We used two Kaggle resources as practical references.  First, the CatBoost ranking notebook by Danofer helped frame the problem as query-level ranking with NDCG-style evaluation \cite{danofercatboost}.  Second, Michael Jahrer's comment on a competition write-up reported that a strong first-place single model used LambdaMART and property level numeric summaries such as means, standard deviations, and medians \cite{jahrercomment}.  These ideas influenced our use of grouped ranking models and property-profile features.
+
+These competition references are consistent with the broader learning-to-rank literature: NDCG rewards correct ordering at the top of a ranked list, while LambdaMART-style gradient boosting directly optimizes ranking losses that approximate such metrics.  LightGBM and XGBoost are especially suitable because they handle nonlinear feature interactions, sparse variables, and large tabular datasets efficiently \cite{burges2010ranknet,ke2017lightgbm,chen2016xgboost}.
+
+\section{Dataset and Exploratory Data Analysis}
+
+\subsection{Dataset Overview}
+
+The raw training set contains 4,958,347 rows, 199,795 search groups, and 129,113 unique hotel properties.  The test set has 4,959,183 rows and 199,549 search groups.  A search contains 24.8 candidate hotels on average, with a median of 29 and a maximum of 38.  The raw train file has 54 columns, while the test file has 50 columns because \texttt{position}, \texttt{click\_bool}, \texttt{booking\_bool}, and \texttt{gross\_bookings\_usd} are train-only fields.  These train-only fields were treated carefully: \texttt{click\_bool} and \texttt{booking\_bool} define the label, while the raw \texttt{position} and \texttt{gross\_bookings\_usd} columns were not used as direct final prediction features.
+
+\begin{table}[t]
+\centering
+\caption{Core dataset statistics.}
+\label{tab:dataset}
+\begin{tabular}{lrr}
+\toprule
+Statistic & Training set & Test set \\
+\midrule
+Rows & 4,958,347 & 4,959,183 \\
+Search groups & 199,795 & 199,549 \\
+Unique properties & 129,113 & 129,438 \\
+Raw columns & 54 & 50 \\
+Mean candidates per search & 24.82 & 24.85 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Label Sparsity}
+The labels are sparse.  Only 2.79\% of rows are bookings and 4.47\% are clicks.  Click-only rows form 1.68\% of the training data, while 95.53\% of rows have no positive interaction.  Figure~\ref{fig:label-dist} shows why row-wise accuracy would be misleading: a trivial model could predict no interaction for almost every row and still fail to rank the few relevant hotels near the top.  We therefore evaluated models with the official NDCG@5 metric, which focuses on the order of relevant hotels within each search and assigns higher gain to bookings than to clicks.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.78\linewidth]{plots/label_distribution.png}
+\caption{Distribution of interaction labels.  Positive feedback is rare, and bookings are much rarer than non-interactions.}
+\label{fig:label-dist}
+\end{figure}
+
+\subsection{Search Group Structure}
+
+The task is naturally grouped by \texttt{srch\_id}: each user sees a list of candidate hotels and chooses within that list.  Figure~\ref{fig:candidate-count} shows that the model must compare many alternatives per query.  It also supports grouped validation: splitting rows independently would place hotels from the same search in both train and validation, inflating performance.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.82\linewidth]{plots/candidate_count_distribution.png}
+\caption{Distribution of the number of hotel candidates per search.  The median search contains 29 candidates.}
+\label{fig:candidate-count}
+\end{figure}
+
+\subsection{Missingness and Drift}
+
+Several feature groups have high missingness. Competitor fields are often missing, with some competitor-rate columns missing in more than 90\% of rows.  Visitor history variables are also sparse: \texttt{visitor\_hist\_starrating} and \texttt{visitor\_hist\_adr\_usd} are missing in about 95\% of rows.  The query affinity score is missing in about 94\% of rows, and \texttt{prop\_location\_score2} is missing in about 22\% of rows.  Figure~\ref{fig:missingness} shows that missingness is not only noise, but a repeated pattern shared by train and test that can carry signal about coverage, property popularity, and competitor availability.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.82\linewidth]{plots/top_missingness.png}
+\caption{Top missingness rates in train and test.  Many competitor and visitor-history variables are sparse, but train and test patterns are similar.}
+\label{fig:missingness}
+\end{figure}
+
+Weekly booking rate trends were also inspected to check for temporal drift (Figure~\ref{fig:weekly-booking}).  Booking rates are not perfectly constant, but there is no significant shift that would make a validation split clearly unrepresentative of the rest of the data.  Grouped validation is still required for a separate reason: rows from the same \texttt{srch\_id} belong to one result list and must not be split across train and validation.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.82\linewidth]{plots/booking_rate_over_time_weekly.png}
+\caption{Weekly booking rate over the training period, used to assess temporal drift.}
+\label{fig:weekly-booking}
+\end{figure}
+
+\subsection{Relative Price and Quality Effects}
+
+Raw hotel attributes are not directly comparable across searches.  A price that is high in one destination may be normal in another.  We therefore examined within-search ranks and quantiles.  Figure~\ref{fig:price-review} shows that cheaper candidates within the same search tend to have higher booking rates. Review-score rank also has a relationship with engagement, although it has a weaker association than price. This motivates within-search feature engineering: ranks, percentiles, z-scores, and differences from group means are more meaningful than raw values alone.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.96\linewidth]{plots/price_review_quantiles.png}
+\caption{Booking rate by within-search price and review-score quantiles.  Relative features help represent how a hotel compares with the alternatives shown to the same user.}
+\label{fig:price-review}
+\end{figure}
+
+\subsection{Historical Position Bias}
+
+Historical display position is strongly associated with observed bookings.  The first position has a booking rate of 14.1\%, while the tenth position is about 2.6\%.  Figure~\ref{fig:position-bias} shows that the observed labels are mixed with exposure effects: users can only click or book hotels they see, and hotels near the top are more likely to be noticed.  The plot does not prove true user preference by itself, but it shows that position must be treated carefully.  Since raw \texttt{position} is absent from test data and reflects the previous ranking policy, it was not used directly as a final prediction feature.  The same pattern was used as evidence for bias analysis.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.82\linewidth]{plots/position_booking_rate.png}
+\caption{Booking rate by historical display position.  The steep drop is consistent with strong exposure bias in the observed labels.}
+\label{fig:position-bias}
+\end{figure}
+
+\section{Methodology}
+
+\subsection{CSV-to-Parquet Conversion}
+
+Before modeling, the raw CSV files were converted to parquet with explicit compact dtypes such as \texttt{float32}, \texttt{int8}, \texttt{int16}, and \texttt{int32}.  This made repeated experiments much faster and smaller: the train and test files decreased from 2.48~GB of CSV data to 172.7~MB of parquet data, a 14.3$\times$ disk reduction.  Full default pandas CSV loads used 2.24~GB of memory for the training file and 2.08~GB for the test file.  The optimized parquet DataFrames used 723.9~MB and 684.4~MB respectively, reducing memory by about 3.09$\times$ for train and 3.04$\times$ for test.
+\subsection{Label Definition}
+
+The training label was encoded as
+\[
+\text{relevance} =
+\begin{cases}
+5, & \text{if } \texttt{booking\_bool}=1,\\
+1, & \text{if } \texttt{click\_bool}=1 \text{ and no booking occurred},\\
+0, & \text{otherwise}.
+\end{cases}
+\]
+This choice matches the competition evaluation and gives more importance to purchases than clicks.  Complete search groups were kept together during splitting.  This avoids leakage between train and validation and matches the final prediction format, where all candidates in one search must be sorted together.
+
+\subsection{Feature Engineering}
+
+The feature pipeline focused on features that are interpretable, leakage-aware, and suitable for tree-based rankers.  The main decisions were:
+
+\begin{itemize}
+\item \textbf{Within-search comparisons.} For price, quality, location, competitor summaries, and value scores, we added ranks, percentile ranks, z-scores, and differences from search-level statistics.  This directly represents the choice set faced by the user.
+\item \textbf{Missingness handling.} We added missing indicators for sparse fields, so the model could directly use whether a value was observed.  We also created imputed versions of some numeric variables, using country-level medians or a deliberately low fallback value.  These imputed versions were useful for derived features such as ranks, differences, and ratios, which require a numeric value.
+\item \textbf{Competitor summaries.} The eight competitor columns were compressed into counts and summary statistics, such as the number of competitors for which Expedia was cheaper or had availability.  This reduced dimensional sparsity while retaining price-competitiveness information.
+\item \textbf{Frequency, affinity, and target encodings.} High-cardinality identifiers such as \texttt{prop\_id} and destination IDs were encoded with frequency features, context-affinity counts, and smoothed target encodings.  Target encodings were fitted out-of-fold for training rows and from the training part only for validation or test rows.  This prevents target leakage.
+\item \textbf{Segment and property profiles.} We added property-level profiles, such as a property's typical price and location-score statistics across train and test rows.  We also added segment-normalized features: for example, a hotel's price was compared with the average price in the same destination, site, property country, or visitor-country segment.  This helped the model interpret values in context, since a price or rating that is high in one destination may be normal in another.
+\item \textbf{Leakage control.} Raw train-only outcome columns were excluded from the features.  Raw \texttt{prop\_id} was not passed to LightGBM because it is very high cardinality; encoded versions were used instead.
+\end{itemize}
+
+Most engineered features were within-search comparisons, target encodings, or segment profiles, which aligns with the EDA findings and avoids relying on one undifferentiated feature set.
+
+\begin{table}[t]
+\centering
+\caption{LightGBM gain importance grouped by feature category.}
+\label{tab:feature-importance-category}
+\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.31\linewidth}r>{\raggedright\arraybackslash}p{0.45\linewidth}@{}}
+\toprule
+Feature category & Gain share & Main interpretation \\
+\midrule
+Search, time, country, and price context & 40.7\% & The model used broad query context heavily, including temporal, geographic, and price-related signals. \\
+Property and segment profiles & 23.1\% & Property-specific price and location deviations were important, supporting the idea that raw hotel attributes must be interpreted relative to a property's usual profile and market segment. \\
+Within-search comparisons & 22.0\% & Ranks, percentiles, z-scores, and differences within each \texttt{srch\_id} helped the model compare hotels against the alternatives shown to the same user. \\
+Target, frequency, and affinity encodings & 13.6\% & Historical property and property-destination behavior added useful popularity and preference signals, with \texttt{prop\_dest\_click\_te} and \texttt{prop\_click\_te} among the strongest examples. \\
+Direct competitor and missing-value signals & 0.6\% & Raw competitor and missingness indicators had small direct gain, although some competitor-derived variables also contributed through the within-search comparison features. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The most important takeaway is that feature count and feature importance were not the same.  Within-search comparison features formed the largest engineered block, but the highest gain came from a smaller set of time, country, price, property-profile, and target-encoding variables.  This supports keeping the feature categories diverse: the final model combined query context, historical hotel behavior, and relative within-search value rather than relying on only one type of signal.
+
+\subsection{Validation Design}
+
+The main validation procedure used five out-of-fold splits at the search-group level.  Folds were partitioned by \texttt{random\_bool}, search month, and whether the query contained a booking when possible.  This was chosen because the model needs to generalize across complete result lists, not isolated rows.  The OOF procedure also allowed us to train auxiliary binary classifiers and compare their predictions on rows they had not seen.
+
+\section{Models}
+
+\subsection{Baselines}
+
+Several baselines were used as sanity checks.  A random baseline assigned a random score to each candidate within a search and obtained NDCG@5 around 0.157.  The property-popularity baseline ranked hotels by their historical average relevance, smoothed toward the global relevance mean so that rarely observed properties did not get extreme scores; this reached 0.27447.  Historical display position ranked candidates by the order in which Expedia originally showed them and achieved 0.37496, but it is leaky and unavailable in the test set.
+
+\subsection{LightGBM Ranker}
+
+The strongest single model was a LightGBM \texttt{LGBMRanker} trained with a LambdaRank objective.  LambdaRank was chosen because it matches the structure of the task more closely than ordinary classification or regression.  The competition score depends on the relative order of hotels inside each \texttt{srch\_id}, especially in the first five positions, rather than probabilities for individual rows.  LambdaRank trains on pairwise ordering errors within each search group and weights those errors by their effect on a ranking metric such as NDCG.  This means that swapping a booked hotel upward near the top of the list receives much more learning signal than correcting the order of two irrelevant hotels near the bottom.  That behavior fits the Expedia labels, where positive events are sparse and bookings are much more valuable than clicks.
+
+LightGBM was selected because it is efficient on millions of tabular rows, handles missing values naturally, supports categorical features, and provides gain-based feature importances.  We did not have enough time to perform an extensive systematic hyperparameter search, so the settings were chosen from validation experiments and conservative defaults for large tabular data.  The main parameters were 1400 estimators, learning rate 0.03, 96 leaves, minimum child samples 2000, row and column subsampling of 0.85, L1 regularization 0.1, L2 regularization 2.0, and LambdaRank truncation level 8.  The low learning rate and large estimator limit allowed gradual boosting, while early stopping selected the effective number of trees.  The leaf count controlled model flexibility, and the large minimum child size, subsampling, and regularization reduced variance and overfitting.  The truncation level was set to 8 because LightGBM docs recommend using a value slightly higher than the target cutoff $k$, such as $k+3$, so that training still focuses on the top-ranked results while using enough document pairs \cite{lightgbmparams}.  Early stopping was used during validation runs: training stopped when additional trees no longer improved validation NDCG@5, which reduced the risk of fitting noise in the training folds.
+
+\subsection{Binary Classifiers}
+
+We also trained LightGBM binary classifiers for \texttt{booking\_bool} and \texttt{click\_bool}.  These models do not optimize NDCG directly, but they capture complementary behavioral signals.  The booking classifier focuses on the rare high-value event, while the click classifier uses a broader signal.  Both classifiers used the same main configuration as the ranker. The binary log-loss objective was chosen because it estimates event probabilities, while the large child size, subsampling, and regularization were important because positive labels are sparse.  Their predicted probabilities were converted into within-search ranks and blended with the ranker scores.  This improved the OOF score because the classifiers emphasized different parts of the relevance label.
+
+\subsection{XGBoost Ranker}
+
+An XGBoost \texttt{XGBRanker} with the \texttt{rank:ndcg} objective was trained on the same engineered feature set.  It used \texttt{ndcg@5} as the validation metric, histogram-based tree construction for efficiency, 1400 estimators, learning rate 0.03, maximum depth 8, minimum child weight 2.0, row and column subsampling of 0.85, L1 regularization 0.1, L2 regularization 2.0, and early stopping when a validation fold was available.  The \texttt{rank:ndcg} objective was chosen to align training with the competition metric, while histogram trees made training feasible on the full tabular dataset.  Depth 8 was used because XGBoost requires an explicit tree-depth limit; it gives enough interaction capacity without allowing very deep trees. The subsampling and regularization settings were set to match LightGBM’s settings, reducing variance and making the comparison mainly about the boosting implementation. We added XGBoost mainly for model diversity: it was slightly weaker alone, but it made different errors and improved the final rank-average blend.
+
+\subsection{Ensembling}
+
+The ensemble was built in two simple stages.  First, the LightGBM ranker, click classifier, and booking classifier were combined.  Before blending, each model score was converted to a percentile rank within the same \texttt{srch\_id}.  This made the scores comparable: a ranker score and a classifier probability do not have the same numerical scale, but their within-search ranks can be averaged.
+
+For hotel $i$ in search group $q$, let $r_q(\cdot)$ denote the percentile rank within that search.  The LightGBM blend was
+\[
+S_i^{\mathrm{LGBM}}=
+0.55\,r_q(s_i^{\mathrm{ranker}})
++0.30\,r_q(s_i^{\mathrm{click}})
++0.15\,r_q(s_i^{\mathrm{booking}}).
+\]
+The weights were not chosen manually.  They were selected by grid search on out-of-fold predictions, using OOF NDCG@5 as the criterion and a step size of 0.05.  The best combination gave most weight to the LambdaRank model, because it was the strongest base model, but kept useful contributions from the click and booking classifiers.
+
+Second, the LightGBM blend was combined with the XGBoost ranker:
+\[
+S_i^{\mathrm{final}}=
+0.75\,r_q(S_i^{\mathrm{LGBM}})
++0.25\,r_q(s_i^{\mathrm{XGB}}).
+\]
+The 75/25 weighting was selected because it was the best grid point in OOF validation.  It improved OOF NDCG@5 over the LightGBM-only blend while still keeping most influence on the stronger LightGBM system.
+
+Figure~\ref{fig:blend-weights} shows the validation performance across the tested blend weights.  The LightGBM-only grid supports the 0.55/0.30/0.15 ranker-click-booking weights directly, since this was the best grid point.  For the final LightGBM/XGBoost blend, the curve peaks at 25\% XGBoost weight, showing that a small XGBoost contribution captured useful diversity without giving too much weight to the weaker standalone model.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.98\linewidth]{plots/blend_weight_performance.png}
+\caption{OOF NDCG@5 across blend weights.  The left panel varies the LightGBM ranker, click, and booking weights, where booking weight is the remaining mass.  The right panel varies the final XGBoost contribution after the LightGBM ensemble.}
+\label{fig:blend-weights}
+\end{figure}
+
+\section{Evaluation and Results}
+
+Table~\ref{tab:results} compares the main baselines and final model variants using NDCG@5, where higher values mean that clicked and booked hotels are placed closer to the top five results.  It includes the LightGBM ranker, auxiliary classifiers, XGBoost, and the final blended models.  The final model comparison was based on grouped OOF validation.
+
+\begin{table}[t]
+\centering
+\caption{Validation and competition results for the main approaches.}
+\label{tab:results}
+\small
+\begin{tabular}{@{}p{0.39\linewidth}p{0.20\linewidth}p{0.31\linewidth}@{}}
+\toprule
+Approach & Validation NDCG@5 & Main observation \\
+\midrule
+Random ranking & $\approx$0.158 & Lower bound for comparison \\
+Property popularity & 0.27447 & Useful but not query-specific \\
+Display position baseline & 0.37496 & Leaky; not used directly \\
+LightGBM ranker & 0.42498 & Strongest single OOF base model \\
+LightGBM booking classifier & 0.41792 & OOF; captures purchase propensity \\
+LightGBM click classifier & 0.42233 & OOF; captures broader engagement \\
+LightGBM rank-average ensemble & 0.42627 & Best LightGBM-only OOF ensemble \\
+XGBoost ranker & 0.42413 & OOF; complementary but weaker alone \\
+Final LGBM/XGB blend & \textbf{0.42657} & Best OOF validation score \\
+Best private leaderboard submission & \textbf{0.43101} & Best private leaderboard score \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The baselines show why a learned ranking model was necessary.  Random ranking gives a lower bound, while property popularity performs better because some hotels are consistently attractive across searches.  However, property popularity cannot adapt to the user's destination, dates, price context, or the competing hotels in the same result list.  The historical display-position baseline is much stronger than popularity, but it is not a valid submission feature because it reflects Expedia's previous ranking order and is not available in the test set.
+
+Among the learned models, the LightGBM ranker was the strongest single base model.  This matches the modeling objective: it directly optimizes a ranking loss and uses complete search groups during training.  The booking and click classifiers were weaker when evaluated alone, which is expected because they optimize binary log-loss rather than NDCG@5.  They were still useful in the ensemble because they captured different behavioral signals: bookings are rare but high value, while clicks provide a broader interaction signal.  XGBoost was also slightly weaker than LightGBM as a standalone ranker, but its predictions were different enough to improve the final blend.
+
+The final LightGBM/XGBoost blend improved local OOF NDCG@5 by about 0.00029 over the LightGBM-only blend.  The gain is small, but it was consistent with the goal of keeping the final model conservative: the XGBoost ranker was not strong enough to dominate the ensemble, but a 25\% contribution added useful diversity.  Our best private leaderboard submission score of 0.43101 was close to the local OOF score, which suggests that the grouped validation design was reasonably aligned with the competition evaluation.
+
+\section{Bias and Fairness Considerations}
+
+The most important bias source is position bias.  Users are more likely to see, click, and book hotels that were placed near the top by Expedia's historical ranking system.  Figure~\ref{fig:position-bias} shows a steep decline in booking rate by display position, so the training labels are partly shaped by previous display order, not only by user preference.  This can reinforce already visible hotels: hotels shown near the top in the past get more interactions, which can make future models more likely to rank them highly.
+
+Other bias sources are also plausible.  Visitor history is missing for most users, so frequent users may be represented better than new users.  Some countries, destinations, and hotel properties appear much more often than others, making target encodings more reliable for popular segments.  Competitor data is sparse and may not be missing at random.  These issues can affect fairness across traveler types, regions, independent properties, and properties with limited historical exposure.
+
+Bias was checked using three signals: exposure patterns in the labels, feature coverage imbalance, and validation performance across segments. Table~\ref{tab:bias-checks} summarizes the main fairness-related metrics. The segment OOF scores are measured on subsets of validation rows, so one segment can score above the overall model score while another scores below it. These metrics do not prove unfair treatment of a protected group, but they show where the model may inherit unequal exposure or uneven data quality.
+
+
+\begin{table}[t]
+\centering
+\caption{Bias and fairness checks used during model assessment.}
+\label{tab:bias-checks}
+\small
+\begin{tabular}{@{}>{\raggedright\arraybackslash}p{0.30\linewidth}>{\raggedright\arraybackslash}p{0.25\linewidth}>{\raggedright\arraybackslash}p{0.35\linewidth}@{}}
+\toprule
+Check & Metric & Interpretation \\
+\midrule
+Position exposure & Booking rate drops from 14.1\% at position 1 to 2.6\% at position 10 & Top positions get more visibility, so clicks and bookings partly reflect where hotels were shown \\
+Randomized traffic & Segment OOF NDCG@5: 0.454 for non-randomized rows vs. 0.364 for randomized rows & The model performs worse on randomized traffic, where the old ranking order gives less guidance \\
+Query signal strength & Segment OOF NDCG@5: 0.461 for searches with a booking vs. 0.350 without a booking & Searches without bookings have weaker positive labels, so they are harder to rank \\
+Feature coverage & Visitor history missing 94.9\%; competitor cells missing 82.5\% on average & The model has less information for users or hotels with many missing values \\
+Market coverage imbalance & Top 10\% destinations cover 76.9\% of rows; top 10\% visitor countries cover 94.8\% & Common markets have more training data, while rare markets may get less reliable estimates \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+
+Inverse propensity weighting (IPW) was tested as a mitigation strategy.  The idea was to give less relative influence to examples from highly exposed positions and more relative influence to examples from under-exposed positions, using an estimated exposure propensity.  This is a reasonable pre-processing mitigation because it targets position bias in click and booking labels. In the tested setup, a LightGBM ranker trained with IPW achieved a Kaggle NDCG@5 of 0.41959. This was lower than the non-IPW LightGBM ranker Kaggle NDCG@5 of 0.42485, so IPW was not included in the final pipeline. The likely reason is that metric evaluates observed clicks and bookings rather than counterfactual user preference, so the debiased IPW objective was not perfectly aligned with the leaderboard objective.
+
+\section{Deployment}
+
+In a real Expedia-like system, this pipeline would be deployed as a batch or near-real-time ranking service.  Most expensive encodings, such as property profiles, frequency counts, target encodings, and segment profiles, should be computed offline and versioned.  At request time, the service would retrieve candidate hotels for a search, construct within-search features for that candidate set, score every candidate, and sort by the final ensemble score.  This design is scalable because LightGBM and XGBoost prediction are fast, while the heaviest aggregation work can be refreshed periodically.
+
+For reliable deployment, the system should monitor NDCG-like offline metrics, online booking and click metrics, and fairness across traveler and property segments.  It should also track distribution drift in missingness, destination mix, price ranges, and randomized traffic.  Randomized exploration is important because it produces less biased feedback for future model updates.
+
+\section{Reflection on Learning}
+
+This assignment showed us how a recommendation problem can be formulated as learning to rank rather than ordinary classification.  We gained practical experience with NDCG@5, grouped validation, LambdaRank-style models, rank-based ensembling, and leakage-safe encodings.  The strongest lesson was that context matters: raw prices, ratings, and location scores were less useful on their own than within-search ranks, differences, and segment-normalized values.  The data size also forced a more careful engineering workflow, including parquet conversion, compact data types, and repeatable feature pipelines.
+
+The main difficulties were label sparsity, missing data, leakage control, and position bias.  Historical display position was much stronger than property popularity, showing how much exposure bias affected the labels, but it could not be used directly for prediction.  IPW was a reasonable mitigation idea, but it reduced Kaggle performance substantially in our experiments.  Ensembling helped, although the XGBoost gain was smaller than expected.  Overall, the project showed that strong performance depended not only on powerful models, but also on validation design and careful interpretation of biased interaction data.
+
+\begin{thebibliography}{8}
+
+\bibitem{burges2010ranknet}
+Burges, C.J.C.:
+From RankNet to LambdaRank to LambdaMART: An overview.
+Microsoft Research Technical Report (2010)
+
+\bibitem{chen2016xgboost}
+Chen, T., Guestrin, C.:
+XGBoost: A scalable tree boosting system.
+In: Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining, pp. 785--794 (2016)
+
+\bibitem{ke2017lightgbm}
+Ke, G., Meng, Q., Finley, T., Wang, T., Chen, W., Ma, W., Ye, Q., Liu, T.-Y.:
+LightGBM: A highly efficient gradient boosting decision tree.
+In: Advances in Neural Information Processing Systems 30 (2017)
+
+\bibitem{lightgbmparams}
+LightGBM Developers:
+Parameters: \texttt{lambdarank\_truncation\_level}.
+\url{https://lightgbm.readthedocs.io/en/latest/Parameters.html#lambdarank_truncation_level}
+
+\bibitem{danofercatboost}
+Danofer:
+Catboost Ranking NDCG - Expedia search queries.
+Kaggle notebook.
+\url{https://www.kaggle.com/code/danofer/catboost-ranking-ncdg-expedia-search-queries}
+
+\bibitem{expedia2013}
+Kaggle:
+Personalize Expedia Hotel Searches - ICDM 2013.
+\url{https://www.kaggle.com/c/expedia-personalized-sort}
+
+\bibitem{jahrercomment}
+Jahrer, M.:
+Comment on ``My Approach'' in the Expedia Personalized Sort competition write-ups.
+Kaggle discussion.
+\url{https://www.kaggle.com/competitions/expedia-personalized-sort/writeups/bing-xu-mlrush-brickmover-my-approach}
+
+\end{thebibliography}
+
+\end{document}
